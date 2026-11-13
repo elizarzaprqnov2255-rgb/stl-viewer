@@ -1,5 +1,5 @@
 // Увеличавай номера (v1 -> v2), когато променяш index.html, за да се обнови офлайн копието.
-const CACHE = 'stl-viewer-v1';
+const CACHE = 'stl-viewer-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
