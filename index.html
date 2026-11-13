@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="STL">
+<meta name="theme-color" content="#1c2230">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-180.png">
+<title>STL прегледач</title>
+<style>
+  :root {
+    --bg: #1c2230;
+    --ink: #e8ecf3;
+    --muted: #8b95a8;
+    --bar: rgba(28, 34, 48, 0.82);
+    --line: rgba(255, 255, 255, 0.12);
+    --btn: #e8ecf3;
+    --btn-ink: #1c2230;
+    --model: #a9bfd3;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #e9edf3;
+      --ink: #1c2230;
+      --muted: #5f6b80;
+      --bar: rgba(233, 237, 243, 0.85);
+      --line: rgba(0, 0, 0, 0.12);
+      --btn: #1c2230;
+      --btn-ink: #f3f5f9;
+      --model: #6f8aa6;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  header, footer {
+    position: fixed; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    background: var(--bar);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  }
+  header {
+    top: 0;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    border-bottom: 1px solid var(--line);
+  }
+  footer {
+    bottom: 0;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 14px;
+    display: none;
+  }
+  footer.on { display: flex; }
+
+  #name {
+    flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-weight: 600;
+  }
+  #name.empty { color: var(--muted); font-weight: 400; }
+
+  button {
+    font: inherit; font-weight: 600;
+    border: 0; border-radius: 10px;
+    padding: 9px 16px;
+    background: var(--btn); color: var(--btn-ink);
+    cursor: pointer;
+  }
+  button.ghost {
+    background: transparent; color: var(--ink);
+    border: 1px solid var(--line);
+  }
+  button:active { opacity: 0.7; }
+  button:focus-visible { outline: 2px solid var(--model); outline-offset: 2px; }
+  button[hidden] { display: none; }
+
+  #hint {
+    position: fixed; inset: 0; z-index: 1;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; padding: 0 32px; text-align: center; pointer-events: none;
+  }
+  #hint strong { font-size: 20px; }
+  #hint span { color: var(--muted); max-width: 30ch; }
+  #hint.err strong { color: #e5646b; }
+  #hint.hide { display: none; }
+  #stats { flex: 1; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<header>
+  <div id="name" class="empty">Няма отворен файл</div>
+  <button id="reset" class="ghost" hidden>Центрирай</button>
+  <button id="open">Отвори</button>
+</header>
+
+<div id="hint">
+  <strong id="hintTitle">Отвори STL файл</strong>
+  <span id="hintText">Натисни „Отвори“ и избери файл от телефона си. Файлът не се качва никъде.</span>
+</div>
+
+<footer id="foot"><div id="stats"></div></footer>
+
+<input id="file" type="file" hidden>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('gl');
+  const gl = canvas.getContext('webgl2', { antialias: true });
+
+  function showHint(title, text, isErr) {
+    $('hintTitle').textContent = title;
+    $('hintText').textContent = text;
+    $('hint').className = isErr ? 'err' : '';
+  }
+
+  if (!gl) {
+    showHint('Не се поддържа 3D', 'Браузърът ти няма WebGL 2. Обнови iOS до версия 15 или по-нова.', true);
+    $('open').disabled = true;
+    return;
+  }
+
+  /* ---------- Малки помощници за матрици (колоново подредени) ---------- */
+  const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+  const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+  const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+  const norm = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+
+  function perspective(fovy, aspect, n, f) {
+    const t = 1 / Math.tan(fovy / 2);
+    return new Float32Array([t/aspect,0,0,0, 0,t,0,0, 0,0,(f+n)/(n-f),-1, 0,0,2*f*n/(n-f),0]);
+  }
+  function lookAt(eye, target, up) {
+    const z = norm(sub(eye, target));
+    const x = norm(cross(up, z));
+    const y = cross(z, x);
+    return {
+      m: new Float32Array([x[0],y[0],z[0],0, x[1],y[1],z[1],0, x[2],y[2],z[2],0, -dot(x,eye),-dot(y,eye),-dot(z,eye),1]),
+      right: x, up: y
+    };
+  }
+
+  /* ---------- Шейдъри ---------- */
+  const VS = `#version 300 es
+  in vec3 aPos;
+  uniform mat4 uMV;
+  uniform mat4 uP;
+  out vec3 vPos;
+  void main() {
+    vec4 p = uMV * vec4(aPos, 1.0);
+    vPos = p.xyz;
+    gl_Position = uP * p;
+  }`;
+  const FS = `#version 300 es
+  precision highp float;
+  in vec3 vPos;
+  uniform vec3 uColor;
+  out vec4 outColor;
+  void main() {
+    vec3 n = normalize(cross(dFdx(vPos), dFdy(vPos)));
+    if (n.z < 0.0) n = -n;
+    float key = max(n.z, 0.0);
+    float side = max(dot(n, normalize(vec3(-0.55, 0.65, 0.45))), 0.0);
+    float rim = max(dot(n, normalize(vec3(0.6, -0.5, 0.3))), 0.0);
+    float li = 0.22 + 0.58 * key + 0.28 * side + 0.10 * rim;
+    outColor = vec4(uColor * li, 1.0);
+  }`;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+
+  const uMV = gl.getUniformLocation(prog, 'uMV');
+  const uP = gl.getUniformLocation(prog, 'uP');
+  const uColor = gl.getUniformLocation(prog, 'uColor');
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+
+  const vao = gl.createVertexArray();
+  const vbo = gl.createBuffer();
+  let vertexCount = 0;
+
+  gl.enable(gl.DEPTH_TEST);
+
+  /* ---------- Четене на STL (двоичен и текстов) ---------- */
+  function parseBinary(dv, n) {
+    const out = new Float32Array(n * 9);
+    let o = 0;
+    for (let i = 0; i < n; i++) {
+      const base = 84 + i * 50 + 12; // прескачаме нормалата
+      for (let k = 0; k < 9; k++) out[o++] = dv.getFloat32(base + k * 4, true);
+    }
+    return out;
+  }
+  function parseAscii(text) {
+    const re = /vertex\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)/gi;
+    const arr = [];
+    let m;
+    while ((m = re.exec(text)) !== null) arr.push(+m[1], +m[2], +m[3]);
+    const usable = arr.length - (arr.length % 9);
+    return Float32Array.from(arr.slice(0, usable));
+  }
+  function parseSTL(buf) {
+    const dv = new DataView(buf);
+    if (buf.byteLength >= 84) {
+      const n = dv.getUint32(80, true);
+      if (n > 0 && (84 + n * 50) <= buf.byteLength) return parseBinary(dv, n);
+    }
+    const text = new TextDecoder().decode(buf);
+    if (/vertex/i.test(text) && /^\s*solid/i.test(text)) {
+      const a = parseAscii(text);
+      if (a.length) return a;
+    }
+    if (buf.byteLength >= 84) {
+      const n = dv.getUint32(80, true);
+      if (n > 0 && (84 + n * 50) <= buf.byteLength) return parseBinary(dv, n);
+    }
+    throw new Error('Файлът не прилича на валиден STL.');
+  }
+
+  /* ---------- Зареждане на модел ---------- */
+  let hasModel = false;
+
+  function loadPositions(pos) {
+    const count = pos.length / 3;
+    if (!count) throw new Error('Файлът не съдържа триъгълници.');
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < pos.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        const v = pos[i + k];
+        if (v < mn[k]) mn[k] = v;
+        if (v > mx[k]) mx[k] = v;
+      }
+    }
+    const size = [mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]];
+    const c = [(mn[0]+mx[0])/2, (mn[1]+mx[1])/2, (mn[2]+mx[2])/2];
+    const radius = 0.5 * Math.hypot(size[0], size[1], size[2]) || 1;
+    for (let i = 0; i < pos.length; i += 3) {
+      pos[i]   = (pos[i]   - c[0]) / radius;
+      pos[i+1] = (pos[i+1] - c[1]) / radius;
+      pos[i+2] = (pos[i+2] - c[2]) / radius;
+    }
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+    vertexCount = count;
+    hasModel = true;
+    return { tris: count / 3, size };
+  }
+
+  const fmt = (n) => n.toLocaleString('bg-BG');
+  const dim = (v) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1));
+
+  async function openFile(file) {
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const info = loadPositions(parseSTL(buf));
+      $('name').textContent = file.name;
+      $('name').className = '';
+      $('stats').textContent =
+        `${fmt(info.tris)} триъгълника  ·  ${dim(info.size[0])} × ${dim(info.size[1])} × ${dim(info.size[2])} ед.`;
+      $('foot').classList.add('on');
+      $('reset').hidden = false;
+      $('hint').className = 'hide';
+      resetView();
+    } catch (e) {
+      showHint('Файлът не може да се отвори', e.message || String(e), true);
+      if (!hasModel) $('foot').classList.remove('on');
+    }
+  }
+
+  /* ---------- Камера ---------- */
+  const FOVY = 45 * Math.PI / 180;
+  const cam = { yaw: -Math.PI / 3, pitch: 0.45, dist: 3, target: [0, 0, 0] };
+  let aspect = 1;
+
+  function resetView() {
+    cam.yaw = -Math.PI / 3;
+    cam.pitch = 0.45;
+    cam.target = [0, 0, 0];
+    const fovx = 2 * Math.atan(Math.tan(FOVY / 2) * aspect);
+    cam.dist = 1.15 / Math.sin(Math.min(FOVY, fovx) / 2);
+    requestDraw();
+  }
+
+  let dpr = 1;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h;
+    }
+    aspect = w / h;
+    requestDraw();
+  }
+
+  function hexToRgb(hex) {
+    const h = hex.trim().replace('#', '');
+    return [0, 2, 4].map((i) => parseInt(h.substr(i, 2), 16) / 255);
+  }
+
+  let queued = false;
+  function requestDraw() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(draw);
+  }
+
+  let lastView = { right: [1, 0, 0], up: [0, 1, 0] };
+
+  function draw() {
+    queued = false;
+    const cs = getComputedStyle(document.documentElement);
+    const bg = hexToRgb(cs.getPropertyValue('--bg'));
+    const model = hexToRgb(cs.getPropertyValue('--model'));
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(bg[0], bg[1], bg[2], 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (!hasModel) return;
+
+    const cp = Math.cos(cam.pitch);
+    const eye = [
+      cam.target[0] + cam.dist * cp * Math.cos(cam.yaw),
+      cam.target[1] + cam.dist * cp * Math.sin(cam.yaw),
+      cam.target[2] + cam.dist * Math.sin(cam.pitch)
+    ];
+    const view = lookAt(eye, cam.target, [0, 0, 1]);
+    lastView = view;
+
+    gl.useProgram(prog);
+    gl.uniformMatrix4fv(uMV, false, view.m);
+    gl.uniformMatrix4fv(uP, false, perspective(FOVY, aspect, Math.max(cam.dist * 0.01, 0.005), cam.dist + 10));
+    gl.uniform3fv(uColor, model);
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+  }
+
+  /* ---------- Жестове: 1 пръст = въртене, 2 пръста = мащаб и преместване ---------- */
+  const pointers = new Map();
+  let prevDist = 0, prevMid = null;
+
+  function clampCam() {
+    const lim = Math.PI / 2 - 0.02;
+    cam.pitch = Math.max(-lim, Math.min(lim, cam.pitch));
+    cam.dist = Math.max(0.25, Math.min(30, cam.dist));
+  }
+  function pan(dx, dy) {
+    const k = (2 * cam.dist * Math.tan(FOVY / 2)) / canvas.clientHeight;
+    for (let i = 0; i < 3; i++) {
+      cam.target[i] += (-lastView.right[i] * dx + lastView.up[i] * dy) * k;
+    }
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    prevDist = 0; prevMid = null;
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pointers.get(e.pointerId);
+    if (!p || !hasModel) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+
+    if (pointers.size === 1) {
+      cam.yaw -= dx * 0.008;
+      cam.pitch += dy * 0.008;
+    } else if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      if (prevDist) cam.dist *= prevDist / d;
+      if (prevMid) pan(mid.x - prevMid.x, mid.y - prevMid.y);
+      prevDist = d; prevMid = mid;
+    }
+    clampCam();
+    requestDraw();
+  });
+  const endPointer = (e) => {
+    pointers.delete(e.pointerId);
+    prevDist = 0; prevMid = null;
+  };
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    cam.dist *= Math.exp(e.deltaY * 0.0015);
+    clampCam();
+    requestDraw();
+  }, { passive: false });
+  canvas.addEventListener('dblclick', resetView);
+
+  /* ---------- Бутони, плъзгане на файл, размер ---------- */
+  $('open').addEventListener('click', () => $('file').click());
+  $('reset').addEventListener('click', resetView);
+  $('file').addEventListener('change', (e) => {
+    openFile(e.target.files[0]);
+    e.target.value = '';
+  });
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    openFile(e.dataTransfer.files[0]);
+  });
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', requestDraw);
+
+  resize();
+  resetView();
+
+  /* ---------- Офлайн режим ---------- */
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
